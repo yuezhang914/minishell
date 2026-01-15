@@ -1,152 +1,123 @@
-/* ************************************************************************** */
-/*                                                                            */
-/*                                                        :::      ::::::::   */
-/*   utils.c                                            :+:      :+:    :+:   */
-/*                                                    +:+ +:+         +:+     */
-/*   By: weiyang <marvin@42.fr>                     +#+  +:+       +#+        */
-/*                                                +#+#+#+#+#+   +#+           */
-/*   Created: 2025/11/11 17:31:17 by weiyang           #+#    #+#             */
-/*   Updated: 2025/11/11 17:31:19 by weiyang          ###   ########.fr       */
-/*                                                                            */
-/* ************************************************************************** */
+// 这个文件就是“解析器的手”：
+// peek_token：偷看下一个 token（不前进）
+// consume_token：吃掉一个 token（指针前进）
+// expect_token：必须是某种 token（否则语法错）
+// is_redir_token：判断是否是 < > >> <<
+// safe_strdup：复制字符串但更安全（失败会报错）
 
-#include "../../include/minishell.h"
-#include "../../include/parse.h"
-#include "../../libft/libft.h"
+#include "minishell.h"
+#include "parse.h"
+#include "error.h"
 
-/**
+/*
  * peek_token
- * ----------------
- * 目的：
- *   查看当前 token 游标指向的 token，但不移动游标。
- *
- * 参数：
- *   - cur : 指向当前 token 游标的指针
- *
- * 返回值：
- *   - 成功：返回当前 token 指针 (*cur)
- *   - 失败：如果 cur 为 NULL，返回 NULL
- *
- * 行为说明：
- *   - 不修改 cur 指向的 token，便于在解析时预览下一个 token
+ * 作用：偷看当前 token（不改变 *cur）
+ * 参数：cur = “当前 token 指针”的地址（因为别的函数会改它）
+ * 返回：当前 token 节点指针；如果 cur 无效或流为空返回 NULL
  */
 t_lexer *peek_token(t_lexer **cur)
 {
+    /* 如果 cur 本身是 NULL，说明调用者传参有问题，直接返回 NULL 防崩 */
     if (!cur)
         return NULL;
+
+    /* 返回当前节点（注意：不移动指针） */
     return *cur;
 }
 
-/**
+/*
  * consume_token
- * ----------------
- * 目的：
- *   消耗当前 token，并将游标移动到下一个 token。
- *
- * 参数：
- *   - cur : 指向当前 token 游标的指针
- *
- * 返回值：
- *   - 成功：返回被消耗的 token 指针
- *   - 失败：如果 cur 或 *cur 为 NULL，返回 NULL
- *
- * 行为说明：
- *   1. 保存当前 token 指针到临时变量 old
- *   2. 将游标 *cur 移动到下一个 token
- *   3. 返回原 token 指针 old
+ * 作用：吃掉（消耗）当前 token，让 *cur 前进到 next
+ * 参数：cur = 当前 token 指针地址
+ * 返回：被吃掉的旧 token 指针（有些解析器会用它做检查/调试）
  */
 t_lexer *consume_token(t_lexer **cur)
 {
+    t_lexer *pt;
+
     if (!cur || !*cur)
         return NULL;
 
-    t_lexer *old = *cur;      
-    *cur = (*cur)->next;     
-    return old;               
+    /* pt 先记住当前 token */
+    pt = *cur;
+
+    /* *cur 前进到下一个 token */
+    *cur = (*cur)->next;
+
+    /* 返回旧 token（可选用） */
+    return pt;
 }
 
-/**
+/*
  * expect_token
- * ----------------
- * 目的：
- *   检查当前 token 是否符合预期类型，如果符合则消耗它，
- *   否则打印语法错误并返回 NULL。
- *
+ * 作用：要求当前 token 必须是某个类型，否则语法错误
  * 参数：
- *   - type : 期望的 token 类型
- *   - cur  : 指向当前 token 游标的指针
- *
- * 返回值：
- *   - 成功：返回当前 token 指针（已消耗）
- *   - 失败：当前 token 不存在或类型不匹配时返回 NULL
- *
- * 行为说明：
- *   1. 检查 cur 或 *cur 是否为 NULL，或 token 类型是否不匹配
- *   2. 如果不匹配，打印语法错误信息
- *   3. 如果匹配，调用 consume_token 消耗当前 token 并返回
+ * - type：期待的 tok_type，比如 TOK_RPAREN
+ * - cur：当前 token 指针地址
+ * 返回：
+ * - 如果匹配：返回 consume_token 后的旧 token
+ * - 不匹配：返回 NULL（并打印错误）
  */
 t_lexer *expect_token(tok_type type, t_lexer **cur)
 {
-    if (!cur || !*cur || (*cur)->tokentype != type)
+    t_lexer *pt;
+
+    pt = peek_token(cur);
+
+    /* pt 为空：说明 token 流结束了，但我们还想要一个 token → 语法错 */
+    if (!pt)
     {
-        fprintf(stderr, "Syntax error : expected token type %d\n", type);
+        ft_putstr_fd("Syntax error: unexpected end of input\n", STDERR_FILENO);
         return NULL;
     }
+
+    /* 类型不匹配 → 语法错 */
+    if (pt->tokentype != type)
+    {
+        ft_putstr_fd("Syntax error: unexpected token\n", STDERR_FILENO);
+        return NULL;
+    }
+
+    /* 匹配：吃掉并返回旧 token */
     return consume_token(cur);
 }
 
-/**
+/*
  * is_redir_token
- * ----------------
- * 目的：
- *   判断给定 token 是否为重定向类型（<, >, >>, <<）。
- *
- * 参数：
- *   - pt : 指向当前 token
- *
- * 返回值：
- *   - 1 : token 是重定向类型
- *   - 0 : token 不是重定向类型
- *
- * 行为说明：
- *   - 检查 token 的 tokentype 是否属于以下类型：
- *       TOK_REDIR_IN, TOK_REDIR_OUT, TOK_APPEND, TOK_HEREDOC
+ * 作用：判断 token 是否是重定向符号：< > >> <<
+ * 参数：pt = 当前 token
+ * 返回：1 表示是；0 表示不是
  */
 int is_redir_token(t_lexer *pt)
 {
-    if (pt->tokentype == TOK_REDIR_IN || 
-        pt->tokentype == TOK_REDIR_OUT || 
-        pt->tokentype == TOK_APPEND || 
+    /* 注意：这里默认 pt 不为 NULL（调用者一般先 peek_token 再判断） */
+    if (pt->tokentype == TOK_REDIR_IN ||
+        pt->tokentype == TOK_REDIR_OUT ||
+        pt->tokentype == TOK_APPEND ||
         pt->tokentype == TOK_HEREDOC)
         return 1;
     else
         return 0;
 }
 
-/**
+/*
  * safe_strdup
- * ----------------
- * 目的：
- *   安全地复制字符串，封装 strdup 并处理内存分配失败。
- *
- * 参数：
- *   - s : 需要复制的源字符串
- *
- * 返回值：
- *   - 成功：返回新分配的字符串副本
- *   - 失败或 s 为 NULL：返回 NULL
- *
- * 行为说明：
- *   1. 如果输入字符串 s 为 NULL，直接返回 NULL
- *   2. 调用 ft_strdup 复制字符串
- *   3. 如果分配失败，打印错误信息
- *   4. 返回复制后的字符串指针
+ * 作用：更安全的字符串复制
+ * - 如果 s 为 NULL：直接返回 NULL
+ * - 如果分配失败：打印错误信息（方便你调试“为什么突然没内存”）
  */
 char *safe_strdup(const char *s)
 {
-    if (!s) return NULL;
+    /* 输入保护：NULL 就不复制 */
+    if (!s)
+        return NULL;
+
+    /* ft_strdup 会 malloc 一块新内存并复制内容 */
     char *p = ft_strdup(s);
+
+    /* 如果内存分配失败，给出提示（stderr） */
     if (!p)
         fprintf(stderr, "memory error: strdup failed\n");
+
     return p;
 }

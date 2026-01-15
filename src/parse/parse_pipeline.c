@@ -1,162 +1,124 @@
-/* ************************************************************************** */
-/*                                                                            */
-/*                                                        :::      ::::::::   */
-/*   parse_pipeline.c                                   :+:      :+:    :+:   */
-/*                                                    +:+ +:+         +:+     */
-/*   By: weiyang <marvin@42.fr>                     +#+  +:+       +#+        */
-/*                                                +#+#+#+#+#+   +#+           */
-/*   Created: 2025/11/11 17:29:31 by weiyang           #+#    #+#             */
-/*   Updated: 2025/11/11 17:29:33 by weiyang          ###   ########.fr       */
-/*                                                                            */
-/* ************************************************************************** */
+#include "minishell.h"
+#include "parse.h"
 
-#include "../../include/minishell.h"
-#include "../../include/parse.h"
-#include "../../libft/libft.h"
-
-/**
- * parse_pipeline_1
- * ----------------
- * 目的：
- *   解析管道操作符 '|'，构建对应的 PIPE 类型 AST 节点。
- *   将左侧命令与右侧命令组合成一棵二叉树表示管道链。
- *
- * 参数：
- *   - cur     : 指向当前 token 游标的指针
- *   - left    : 指向已解析的左侧 AST 节点指针（输入/输出参数）
- *   - n_pipes : 指向管道数量计数器，每遇到一个 '|' 就递增
- *
- * 返回值：
- *   - 成功：返回更新后的 AST 节点（PIPE 树的根）
- *   - 失败：语法错误或内存分配失败时返回 NULL，并释放相关 AST
- *
- * 行为说明：
- *   1. 循环检查当前 token 是否为 TOK_PIPE
- *   2. 消耗管道符 token
- *   3. 调用 parse_simple_cmd() 解析管道右侧命令
- *   4. 为管道创建一个新的 NODE_PIPE AST 节点，将左/右子树连接
- *   5. 更新 left 指针为新创建的 PIPE 节点，继续处理后续管道
+/*
+ * check_consecutive_pipes（static）
+ * 作用：检查是否出现连续 pipe，比如： "ls ||" 或 "| |"
+ * 你的 minishell 不支持逻辑 OR，所以 "||" 这里会被看成连续管道符错误。
+ * 返回：发现错误返回 -1；正常返回 0
  */
-static ast *parse_pipeline_1(t_lexer **cur, ast **left, int *n_pipes, t_minishell *minishell)
+static int check_consecutive_pipes(t_lexer **cur)
 {
-    ast *right;
     t_lexer *pt;
 
+    pt = peek_token(cur);
+
+    /* pt->next 是下一个 token，如果也是 TOK_PIPE 就是连续 */
+    if (pt && pt->next && pt->next->tokentype == TOK_PIPE)
+    {
+        ft_putstr_fd("minishell: syntax error near unexpected token `|'\n", STDERR_FILENO);
+        return (-1);
+    }
+    return 0;
+}
+
+/*
+ * make_pipe_node（static）
+ * 作用：创建一个 NODE_PIPE 节点，把 left/right 接上
+ * 同时 *n_pipes++ 用于统计管道数量
+ */
+static t_ast *make_pipe_node(t_ast *left, t_ast *right, int *n_pipes)
+{
+    t_ast *node;
+
+    node = ft_calloc(1, sizeof(t_ast));
+    if (!node)
+        return (NULL);
+
+    node->type = NODE_PIPE;
+    node->left = left;
+    node->right = right;
+
+    /* 管道数量 +1：执行器后面会用这个数量去创建 pipe fd 数组 */
+    (*n_pipes)++;
+
+    return node;
+}
+
+/*
+ * parse_pipeline_1（static）
+ * 作用：在已经解析出 left 的情况下，继续处理后续的 | right | right...
+ * 参数：
+ * - cur：token 流指针地址
+ * - left：当前已经构建好的左子树（会不断变成更大的树）
+ * - n_pipes：管道数量计数器地址
+ * - minishell：全局上下文
+ */
+static t_ast *parse_pipeline_1(t_lexer **cur, t_ast **left, int *n_pipes,
+                               t_minishell *minishell)
+{
+    t_ast *right;
+    t_ast *node;
+
+    /* 只要下一个 token 还是 PIPE，就说明还有管道连接 */
     while (peek_token(cur) && peek_token(cur)->tokentype == TOK_PIPE)
     {
-        // 检查是否是连续的管道符号
-        pt = peek_token(cur);
-        if (pt && pt->next && pt->next->tokentype == TOK_PIPE) // 连续的管道符号
-        {
-            ft_putstr_fd("bash: syntax error near unexpected token `|'\n", STDERR_FILENO);
+        /* 防连续 pipe */
+        if (check_consecutive_pipes(cur) == -1)
             return (free_ast(*left), NULL);
-        }
 
-        consume_token(cur);  // 消耗管道符号
+        /* 吃掉 '|' */
+        consume_token(cur);
 
-        // 解析管道右侧的命令
+        /* 解析右侧的简单命令 */
         right = parse_simple_cmd_redir_list(cur, minishell);
+        if (!right)
+            return (free_ast(*left), NULL);
 
-        // 如果右侧命令为空，提示用户继续输入
-        while (!right) // 如果没有右侧命令，继续等待输入
-        {
-            //ft_putstr_fd("Error: expected command after pipe. Waiting for input...\n", STDERR_FILENO);
-            
-            // 提示用户输入右侧命令
-            char *buf = readline("> ");
-            if (!buf)  // 如果用户按下 Ctrl+D 退出
-            {
-                printf("bash: syntax error: unexpected end of file\n");
+        /* 把 left 和 right 拼成一个新的 pipe 节点 */
+        node = make_pipe_node(*left, right, n_pipes);
+        if (!node)
+            return (free_ast(*left), free_ast(right), NULL);
 
-                printf("exit\n");
-                exit(2);
-            }
-
-            // 创建新的 t_minishell 结构体并解析输入
-            t_minishell *test = calloc(1, sizeof(t_minishell));
-            if (!test) {
-                free(buf);
-                return (free_ast(*left), NULL);  // 内存分配失败，释放内存并返回
-            }
-            test->raw_line = buf;
-            handle_lexer(test);  // 处理 lexer
-
-            // 继续解析右侧命令
-            right = parse_simple_cmd_redir_list(&(test->lexer), minishell);
-            if (!right) {
-                free(buf);
-                free(test);
-                continue;  // 如果右侧命令还是为空，继续提示用户输入
-            }
-
-            free(test);  // 使用完后释放
-        }
-
-        // 创建管道节点并连接左/右命令
-        ast *node = ft_calloc(1, sizeof(ast));
-        if (!node) {
-            free_ast(*left);
-            free_ast(right);
-            return NULL;
-        }
-        node->type = NODE_PIPE;
-        node->left = *left;
-        node->right = right;
-        (*n_pipes)++;
+        /* 新树成为 left，继续看后面是否还有 | */
         *left = node;
     }
 
     return (*left);
 }
 
-
-
-
-
-/**
+/*
  * parse_pipeline
- * ----------------
- * 目的：
- *   解析一条完整的管道命令，将多个通过 '|' 连接的简单命令
- *   构建成 PIPE 类型的 AST 树。
- *
- * 参数：
- *   - cur : 指向当前 token 游标的指针
- *
- * 返回值：
- *   - 成功：返回包含整个管道结构的 AST 根节点
- *   - 失败：解析失败时返回 NULL
- *
- * 行为说明：
- *   1. 首先调用 parse_simple_cmd() 解析管道最左侧的命令
- *   2. 调用 parse_pipeline_1() 解析右侧可能存在的管道，更新 AST
- *   3. 将管道数量 n_pipes 保存到 AST 根节点的 n_pipes 字段
- *   4. 返回 AST 根节点
+ * 作用：pipeline 的入口：解析第一个 simple_cmd，然后不断吸收后续 | simple_cmd
+ * 返回：pipeline 的根节点（可能是 CMD，也可能是 PIPE 树）
  */
-ast *parse_pipeline(t_lexer **cur, t_minishell *minishell)
+t_ast *parse_pipeline(t_lexer **cur, t_minishell *minishell)
 {
-    ast *left;
-    int n_pipes;
+    t_ast *left;
+    int   n_pipes;
 
-    // 🚨 如果一开始就是 PIPE，直接报错
+    /* 如果一上来就是 '|'，这是语法错 */
     if (peek_token(cur) && peek_token(cur)->tokentype == TOK_PIPE)
     {
-        ft_putstr_fd(
-            "bash: syntax error near unexpected token `|'\n",
-            STDERR_FILENO
-        );
+        ft_putstr_fd("minishell: syntax error near unexpected token `|'\n",
+                     STDERR_FILENO);
         return NULL;
     }
 
+    /* 先解析左边第一个命令 */
     left = parse_simple_cmd_redir_list(cur, minishell);
     if (!left)
-        return NULL;  // 其他语法错误，不是 PIPE
+        return NULL;
 
     n_pipes = 0;
-    ast *result = parse_pipeline_1(cur, &left, &n_pipes, minishell);
+
+    /* 把后续管道都吃掉并建树 */
+    t_ast *result = parse_pipeline_1(cur, &left, &n_pipes, minishell);
     if (!result)
         return NULL;
 
-    left->n_pipes = n_pipes;
+    /* 记录本行管道数量到 minishell（执行器用） */
+    minishell->n_pipes = n_pipes;
+
     return result;
 }

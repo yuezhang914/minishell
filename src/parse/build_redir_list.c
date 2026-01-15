@@ -1,69 +1,40 @@
-/* ************************************************************************** */
-/*                                                                            */
-/*                                                        :::      ::::::::   */
-/*   build_redir_list.c                                 :+:      :+:    :+:   */
-/*                                                    +:+ +:+         +:+     */
-/*   By: weiyang <marvin@42.fr>                     +#+  +:+       +#+        */
-/*                                                +#+#+#+#+#+   +#+           */
-/*   Created: 2025/11/25 16:17:59 by weiyang           #+#    #+#             */
-/*   Updated: 2025/11/25 16:18:01 by weiyang          ###   ########.fr       */
-/*                                                                            */
-/* ************************************************************************** */
+// 这个文件是“把重定向 token 变成结构体”的工厂。
 
-#include "../../include/minishell.h"
-#include "../../include/parse.h"
-#include "../../libft/libft.h"
+#include "minishell.h"
+#include "parse.h"
 
-/**
+/*
  * create_redir
- * ------------------------------------------------------------
- * 目的：
- *   为解析阶段创建一个新的重定向节点（t_redir），并根据
- *   token 类型设置其重定向种类（输入、输出、追加、heredoc）。
- *   同时会复制文件名（或 delimiter）字符串，以保证内存独立性。
- *
+ * 作用：创建并初始化一个 t_redir 节点
  * 参数：
- *   @type    - 来自词法分析的 token 类型（tok_type）
- *              TOK_REDIR_IN, TOK_REDIR_OUT, TOK_APPEND, TOK_HEREDOC
- *
- *   @content - 重定向后跟随的目标文件名或 heredoc 的 delimiter。
- *              该字符串由 lexer 提供，这里会 strdup() 创建副本。
- *
- * 返回值：
- *   成功：返回新创建且初始化完毕的 t_redir 指针
- *   失败：返回 NULL（内存分配失败）
- *
- * 逻辑说明：
- *   1. 分配一个 t_redir 节点并初始化为 0。
- *   2. 使用 strdup() 复制 content，确保 redir 节点拥有自己的内存。
- *   3. 根据 token 类型设置节点的重定向类型：
- *         - TOK_REDIR_IN   -> `<`
- *         - TOK_REDIR_OUT  -> `>`
- *         - TOK_APPEND     -> `>>`
- *         - TOK_HEREDOC    -> `<<`
- *   4. heredoc_fd 初始化为 -1，表示暂未创建管道。
- *   5. 返回配置完成的节点。
+ * - type：lexer 的 tokentype（TOK_REDIR_IN / TOK_REDIR_OUT / TOK_APPEND / TOK_HEREDOC）
+ * - filename：对 < > >> 是文件名；对 << 是 delimiter
+ * 返回：新分配的 t_redir*；失败返回 NULL
  */
-static t_redir *create_redir(tok_type type, char *content)
+static t_redir *create_redir(tok_type type, char *filename)
 {
-    t_redir *new_node = ft_calloc(1, sizeof(t_redir));
-    if (!new_node)
-        return NULL;
-    char *new_content = ft_strdup(content);
-    if (!new_content)
-    {
-        free(new_node);
-        return NULL;
-    }
-    new_node->filename = ft_strdup(new_content);
-    if (!new_node->filename)
-    {
-        free(new_node);
-        return NULL;
-    }
-    new_node->next = NULL;
-    new_node->heredoc_fd = -1; // 明确无效值
+    t_redir *new_node;
 
+    /* calloc：分配并清零（避免字段是脏值） */
+    new_node = ft_calloc(1, sizeof(t_redir));
+    if (!new_node)
+        return (NULL);
+
+    /* next 默认 NULL（calloc 已清零） */
+    new_node->next = NULL;
+
+    /* filename：这里用 safe_strdup，确保我们自己拥有一份内存 */
+    new_node->filename = safe_strdup(filename);
+    if (!new_node->filename)
+        return (free(new_node), NULL);
+
+    /* heredoc_fd 初始为 -1：表示“还没准备好” */
+    new_node->heredoc_fd = -1;
+
+    /* 默认：还没展开 */
+    new_node->is_expanded = false;
+
+    /* 把 lexer 的 token 类型映射到 redir_type */
     if (type == TOK_REDIR_IN)
         new_node->type = REDIR_INPUT;
     else if (type == TOK_REDIR_OUT)
@@ -72,31 +43,16 @@ static t_redir *create_redir(tok_type type, char *content)
         new_node->type = REDIR_APPEND;
     else if (type == TOK_HEREDOC)
         new_node->type = HEREDOC;
-    return new_node;
+
+    return (new_node);
 }
 
-/**
+/*
  * redirlst_add_back
- * ------------------------------------------------------------
- * 目的：
- *   将一个新的重定向节点（t_redir）追加到重定向链表末尾。
- *   该链表保存所有与当前命令相关的重定向（<, >, >>, <<）。
- *
+ * 作用：把新 redir 节点追加到 redir 链表末尾
  * 参数：
- *   @lst       - 指向重定向链表头指针的地址（t_redir**）。
- *                如果链表为空，本函数会将 new_node 设为链表头。
- *
- *   @new_node  - 已分配并初始化好的 t_redir 节点。
- *                其 next 字段应由调用者保证为 NULL。
- *
- * 返回值：
- *   无（void）。
- *   若 lst 或 new_node 为 NULL，本函数将不进行任何操作。
- *
- * 逻辑：
- *   1. 检查参数有效性。
- *   2. 若链表为空，则直接将 new_node 设为头节点。
- *   3. 若链表非空，则遍历至尾节点，并将 new_node 挂在末尾。
+ * - lst：redir 链表头指针的地址（因为可能要改头）
+ * - new_node：要加进去的新节点
  */
 static void redirlst_add_back(t_redir **lst, t_redir *new_node)
 {
@@ -104,76 +60,101 @@ static void redirlst_add_back(t_redir **lst, t_redir *new_node)
 
     if (!lst || !new_node)
         return;
+
+    /* 空链表：直接把新节点作为头 */
     if (*lst == NULL)
     {
         *lst = new_node;
         return;
     }
+
+    /* 找到末尾 */
     tmp = *lst;
     while (tmp->next)
         tmp = tmp->next;
+
+    /* 尾插 */
     tmp->next = new_node;
 }
 
-/**
- * build_redir
- * ------------------------------------------------------------
- * 目的：
- *   从当前 lexer 位置解析一个重定向操作（<, >, >>, <<），
- *   构建对应的 t_redir 节点并追加到重定向链表中。
- *
+/*
+ * consume_redir_pair
+ * 作用：从 token 流里吃掉 “重定向操作符 + 文件名/终止符”
+ * 例如：吃掉 "<" + "in.txt"
  * 参数：
- *   @cur   - 指向当前 lexer 指针的地址（t_lexer**）。
- *            本函数会从 token 流中消费两个 token：
- *            1. 重定向操作符（<, >, >>, <<）
- *            2. 后面的文件名（TOK_WORD）
- *
- *   @node  - 当前正在构建的 AST 节点。
- *            若解析失败，会调用 free_ast_partial(node) 释放资源。
- *
- *   @redir - 已存在的重定向链表头。
- *            若为 NULL，本函数会创建新的头节点。
- *
- * 返回值：
- *   成功：返回更新后的重定向链表头（可能与原 redir 相同或变为 new）。
- *   失败：返回 NULL，并释放 node 的部分资源。
- *
- * 逻辑：
- *   1. 从 token 流中取出重定向符号与下一 token（文件名）。
- *   2. 若格式错误或 token 类型不正确，则释放 AST 并返回 NULL。
- *   3. 根据 token 类型创建对应的 t_redir 节点（create_redir）。
- *   4. 如果是 heredoc (<<)，调用 handle_heredoc() 处理内容。
- *   5. 将新节点追加到 redir 链表末尾。
- *   6. 返回更新后的 redir 链表头。
+ * - cur：token 流指针地址（会前进）
+ * - op：输出：操作符 token（比如 TOK_REDIR_IN）
+ * - filetok：输出：文件名 token（必须是 TOK_WORD）
+ * - ms：全局状态（这里用于错误处理/保持一致接口）
+ * 返回：成功 1；失败 0（比如缺少文件名）
  */
-t_redir *build_redir(t_lexer **cur, ast *node, t_redir *redir, t_minishell *minishell)
+static int consume_redir_pair(t_lexer **cur, t_lexer **op,
+                              t_lexer **filetok, t_minishell *ms)
 {
-    t_lexer *op = consume_token(cur);
-    t_lexer *filetok = consume_token(cur);
+    (void)ms; /* 这份代码里 ms 没用到，但保留参数方便以后扩展 */
+
+    /* op = 当前 token（应该是 < > >> <<） */
+    *op = consume_token(cur);
+    if (!*op)
+        return (0);
+
+    /* filetok = 下一个 token（必须是 TOK_WORD） */
+    *filetok = peek_token(cur);
+    if (!*filetok || (*filetok)->tokentype != TOK_WORD)
+    {
+        ft_putstr_fd("minishell: syntax error near unexpected token\n", STDERR_FILENO);
+        return (0);
+    }
+
+    /* 吃掉文件名 token */
+    consume_token(cur);
+
+    return (1);
+}
+
+/*
+ * build_redir
+ * 作用：解析并构建一个 redirection 节点，追加到 redir_list
+ * 参数：
+ * - cur：token 流指针地址
+ * - redir_list：redir 链表头指针地址
+ * - ms：全局上下文（用于 heredoc 的 quoted 标记等）
+ * 返回：
+ * - 成功 1
+ * - 失败 0（语法错或 malloc 失败）
+ */
+int build_redir(t_lexer **cur, t_redir **redir_list, t_minishell *ms)
+{
+    t_lexer *op;
+    t_lexer *filetok;
     t_redir *new_redir;
+    char    *text;
 
-    if (!op || !filetok || filetok->tokentype != TOK_WORD)
-    {
-        fprintf(stderr, "bash: syntax error near unexpected token `newline'\n");
-        minishell->last_exit_status = 2;
-        free_ast_partial(node);
-        return NULL;
-    }
-    new_redir = create_redir(op->tokentype, filetok->str);
-    if (!new_redir)
-    {
-        free_ast_partial(node);
-        return NULL;
-    }
+    new_redir = NULL;
+    text = NULL;
+
+    /* 先吃掉两件套：操作符 + 文件名/终止符 */
+    if (!consume_redir_pair(cur, &op, &filetok, ms))
+        return (0);
+
+    /* 默认取 raw（含引号原样） */
+    text = filetok->raw;
+
+    /* heredoc 的 delimiter：你这里改用 filetok->str（去掉引号的） */
     if (op->tokentype == TOK_HEREDOC)
-    {
-        if (handle_heredoc(new_redir, minishell) == -1)
-        {
-            redirlst_add_back(&redir, new_redir);
+        text = filetok->str;
 
-            return NULL; // 返回 NULL 上层可检测停止命令执行
-        }
-    }
-    redirlst_add_back(&redir, new_redir);
-    return redir;
+    /* 创建 redir 节点（会 safe_strdup 复制一份 text） */
+    new_redir = create_redir(op->tokentype, text);
+    if (!new_redir)
+        return (0);
+
+    /* heredoc：记录 delimiter 是否带引号（带引号就不展开变量） */
+    if (op->tokentype == TOK_HEREDOC)
+        new_redir->quoted = filetok->had_quotes;
+
+    /* 加到链表末尾 */
+    redirlst_add_back(redir_list, new_redir);
+
+    return (1);
 }

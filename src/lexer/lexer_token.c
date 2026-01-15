@@ -1,33 +1,16 @@
-/* ************************************************************************** */
-/*                                                                            */
-/*                                                        :::      ::::::::   */
-/*   lexer_token.c                                      :+:      :+:    :+:   */
-/*                                                    +:+ +:+         +:+     */
-/*   By: yzhang2 <yzhang2@student.42.fr>            +#+  +:+       +#+        */
-/*                                                +#+#+#+#+#+   +#+           */
-/*   Created: 2025/10/26 04:44:56 by yzhang2           #+#    #+#             */
-/*   Updated: 2025/12/20 16:31:00 by yzhang2          ###   ########.fr       */
-/*                                                                            */
-/* ************************************************************************** */
+#include "lexer.h"
+#include "minishell.h"
 
-
-#include "../../include/minishell.h"
-#include "../../include/lexer.h"
-
-
-// 改了什么
-// 符号 token 改为 add_node(NULL, token, list)（关键修复）
-// is_token 只识别 mandatory 需要的字符（| < >），不把 ; \ 等当语法
 /*
 ** 函数作用：
 ** 判断一个字符是不是“需要单独当成符号 token”的字符。
 ** 这里只保留 minishell 必做的：| < >
 **
-** 参数含义：
-** c：当前字符（比如 '|' '<' '>'）
+** 参数：
+** c：当前字符
 **
-** 返回值：
-** 对应的 tok_type；如果不是符号就返回 0
+** 返回：
+** 对应 tok_type；不是符号返回 0
 */
 tok_type	is_token(int c)
 {
@@ -44,24 +27,26 @@ tok_type	is_token(int c)
 ** 函数作用：
 ** 处理双字符符号：>> 和 <<
 **
-** 参数含义：
-** tokentype：当前位置的单字符 token 类型（> 或 <）
-** next_char：下一个字符（用于判断是不是 > 或 <）
-** list：token 链表头指针地址（把新 token 加进去）
+** 参数：
+** tokentype：当前位置单字符 token（> 或 <）
+** next_char：下一个字符
+** list：token 链表头指针地址
 **
-** 返回值：
-** 成功消费 2 个字符返回 2
-** 失败返回 -1
-** 不属于双字符返回 0
+** 返回：
+** - 成功消费 2 个字符：返回 2
+** - 不是双字符：返回 0
+** - add_node 失败：返回 -1
 */
 static int	handle_double_token(tok_type tokentype, int next_char, t_lexer **list)
 {
+	/* 当前是 > 且下一个也是 > => >> */
 	if (tokentype == TOK_REDIR_OUT && is_token(next_char) == TOK_REDIR_OUT)
 	{
 		if (!add_node(NULL, TOK_APPEND, list))
 			return (-1);
 		return (2);
 	}
+	/* 当前是 < 且下一个也是 < => << */
 	if (tokentype == TOK_REDIR_IN && is_token(next_char) == TOK_REDIR_IN)
 	{
 		if (!add_node(NULL, TOK_HEREDOC, list))
@@ -75,15 +60,15 @@ static int	handle_double_token(tok_type tokentype, int next_char, t_lexer **list
 ** 函数作用：
 ** 处理一个符号 token（| < > 或 >> <<）并把它加入 token 链表。
 **
-** 参数含义：
+** 参数：
 ** str：整行输入
-** i：当前下标（从这里开始识别）
-** list：token 链表头指针地址
+** i：当前位置下标
+** list：链表头指针地址
 **
-** 返回值：
-** 返回本次“消耗了多少字符”（1 或 2）
-** 出错返回 -1
-** 如果当前位置不是符号返回 0
+** 返回：
+** - 消耗字符数：1 或 2
+** - 出错：-1
+** - 当前位置不是符号：0
 */
 int	handle_token(char *str, int i, t_lexer **list)
 {
@@ -91,14 +76,16 @@ int	handle_token(char *str, int i, t_lexer **list)
 	int			next_char;
 	int			res;
 
-	token = is_token((unsigned char)str[i]);
-	next_char = (unsigned char)str[i + 1];
+	token = is_token((unsigned char)str[i]); /* 当前字符的单字符 token */
+	next_char = (unsigned char)str[i + 1];   /* 预读下一个字符 */
+
 	res = handle_double_token(token, next_char, list);
 	if (res != 0)
-		return (res);
-	if (token != 0)
+		return (res);                        /* 2 或 -1 */
+
+	if (token != 0)                          /* 单字符 token */
 	{
-		if (!add_node(NULL, token, list))
+		if (!add_node(NULL, token, list))    /* 注意：符号 token 传 NULL */
 			return (-1);
 		return (1);
 	}
@@ -109,15 +96,15 @@ int	handle_token(char *str, int i, t_lexer **list)
 ** 函数作用：
 ** 从 i 开始匹配一段完整引号（'...' 或 "..."），返回这段长度。
 **
-** 参数含义：
+** 参数：
 ** i：起点下标
 ** str：原字符串
 ** quote：引号字符（' 或 "）
 **
-** 返回值：
-** 找到闭合引号：返回包含首尾引号在内的总长度
-** 未闭合：返回 -1
-** 当前位置不是该引号：返回 0
+** 返回：
+** - 找到闭合引号：返回总长度（包含首尾引号）
+** - 未闭合：返回 -1
+** - 当前位置不是该引号：返回 0
 */
 int	match_quotes(int i, char *str, char quote)
 {
@@ -126,13 +113,13 @@ int	match_quotes(int i, char *str, char quote)
 	j = 0;
 	if (str[i + j] == quote)
 	{
-		j = j + 1;
+		j = j + 1;                           /* 跳过开引号 */
 		while (str[i + j] != quote && str[i + j])
-			j = j + 1;
+			j = j + 1;                       /* 找闭引号 */
 		if (str[i + j] == quote)
-			j = j + 1;
+			j = j + 1;                       /* 把闭引号也算进长度 */
 		else
-			return (-1);
+			return (-1);                     /* 没找到闭合 => 未闭合 */
 	}
-	return (j);
+	return (j);                              /* 0 表示当前位置不是该 quote */
 }

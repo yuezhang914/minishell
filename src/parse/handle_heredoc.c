@@ -1,123 +1,159 @@
-#include "../../include/minishell.h"
-#include "../../include/parse.h"
-#include "../../libft/libft.h"
-volatile sig_atomic_t g_signal; // 唯一全局变量
+#include "exec.h"
+#include "minishell.h"
+#include "parse.h"
 
-/* SIGINT handler */
-void sigint_heredoc(int sig)
+/*
+ * heredoc_fork_child（static）
+ * 作用：子进程负责读 heredoc 内容并写到 pipefd[1]
+ * 参数：
+ * - redir：当前 heredoc 的 redir 节点（filename=delimiter，quoted 表示是否展开）
+ * - shell：全局上下文（expand 变量可能用 env）
+ * - pipefd：管道 [0]=读端 [1]=写端
+ */
+static void heredoc_fork_child(t_redir *redir, t_minishell *shell, int pipefd[2])
 {
-    (void)sig;
-    g_signal = SIGINT;
+    int result;
+
+    /* 设置 heredoc 专用信号行为 */
+    setup_heredoc_signals();
+
+    /* 子进程只写，所以关闭读端 */
+    close(pipefd[0]);
+
+    /* quoted==1：不展开；quoted==0：展开 */
+    if (redir->quoted)
+        result = heredoc_loop(pipefd[1], redir->filename, shell, 1);
+    else
+        result = heredoc_loop(pipefd[1], redir->filename, shell, 0);
+
+    /* 如果 heredoc_loop < 0：一般是被 Ctrl-C 中断 */
+    if (result < 0)
+    {
+        close(pipefd[1]);
+
+        /* ms_child_exit：你执行模块里的“子进程安全退出”（会清理资源） */
+        ms_child_exit(shell, shell->cur_t_ast, 130);
+    }
+
+    /* 正常结束：关闭写端并退出 */
+    close(pipefd[1]);
+    ms_child_exit(shell, shell->cur_t_ast, 0);
 }
 
-/* heredoc_loop: canonical 模式，和 bash 行为一致 */
-int heredoc_loop(int write_fd, const char *delimiter)
+/*
+ * wait_for_child（static）
+ * 作用：父进程等待子进程结束（处理 EINTR）
+ * EINTR：waitpid 被信号打断，需要重试
+ */
+static int wait_for_child(pid_t pid, int *status)
 {
-    char *line;
-    char *full_line = NULL; // 用于拼接没有换行符的片段
-
-    struct sigaction sa = {.sa_handler = sigint_heredoc, .sa_flags = 0};
-    sigaction(SIGINT, &sa, NULL);
-
-    while (1)
+    while (waitpid(pid, status, 0) == -1)
     {
-        // 只有当缓冲区为空时，才打印提示符
-        if (full_line == NULL)
-            write(STDOUT_FILENO, "heredoc> ", 9);
+        if (errno != EINTR)
+            return (-1);
+    }
+    return (0);
+}
 
-        g_signal = 0;
-        line = get_next_line(STDIN_FILENO);
+/*
+ * handle_child_exit（static）
+ * 作用：解析子进程退出原因，并决定 heredoc_fd 是否有效
+ * - 正常退出且 code==0：把 pipefd[0] 保存到 redir->heredoc_fd
+ * - 如果 code!=0 或被信号杀死：关闭 pipefd[0]，并标记 heredoc_fd=-1
+ */
+static int handle_child_exit(int status, int pipefd[2], t_redir *redir, t_minishell *shell)
+{
+    if (WIFEXITED(status))
+    {
+        int code = WEXITSTATUS(status);
 
-        // --- 处理 Ctrl+C ---
-        if (g_signal == SIGINT)
+        /* 子进程非 0：表示出错或中断 */
+        if (code != 0)
         {
-            free(line);
-            free(full_line);
-            write(1, "\n", 1);
-            return -1;
-        }
-
-        // --- 处理 Ctrl+D ---
-        if (!line)
-        {
-            if (full_line == NULL)
-            { // 纯空行按 Ctrl+D
-                printf("bash: warning: ... (wanted '%s')\n", delimiter);
-                break;
-            }
-            // 如果有残留内容按 Ctrl+D，Bash 会将其视为一行处理
-            line = full_line;
-            full_line = NULL;
-        }
-        else if (full_line)
-        { // 如果之前有没写完的片段，拼接起来
-            char *tmp = ft_strjoin(full_line, line);
-            free(full_line);
-            free(line);
-            line = tmp;
-        }
-
-        // --- 判断是否读到了完整的一行 ---
-        size_t len = strlen(line);
-        if (len > 0 && line[len - 1] == '\n')
-        {
-            line[len - 1] = '\0'; // 去掉换行符
-            if (strcmp(line, delimiter) == 0)
-            {
-                free(line);
-                break;
-            }
-            write(write_fd, line, strlen(line));
-            write(write_fd, "\n", 1);
-            free(line);
-            full_line = NULL; // 清空暂存，下次循环会打印提示符
-        }
-        else
-        {
-            // 没有换行符，说明用户按了 Ctrl+D
-            // 我们暂存这段文字，进入下一次 read，不打印提示符
-            full_line = line;
+            close(pipefd[0]);
+            redir->heredoc_fd = -1;
+            shell->last_exit_status = code;
+            return (-1);
         }
     }
-    return 0;
+    else if (WIFSIGNALED(status))
+    {
+        /* 子进程被信号杀死 */
+        close(pipefd[0]);
+        redir->heredoc_fd = -1;
+
+        /* bash 风格：128 + 信号编号 */
+        shell->last_exit_status = 128 + WTERMSIG(status);
+        return (-1);
+    }
+
+    /* 走到这里表示 heredoc 正常：父进程保留读端 fd */
+    redir->heredoc_fd = pipefd[0];
+    return (0);
 }
 
-int handle_heredoc(t_redir *new_redir, t_minishell *shell)
+/*
+ * heredoc_parent（static）
+ * 作用：父进程逻辑：
+ * - 关闭写端（只读）
+ * - 等子进程结束
+ * - 根据退出状态决定是否保留读端 fd
+ */
+static int heredoc_parent(pid_t pid, int pipefd[2], t_redir *redir, t_minishell *shell)
 {
-    int pipefd[2];
-    pid_t pid;
     int status;
 
-    if (pipe(pipefd) < 0)
-        return -1;
+    /* 父进程只读：关闭写端 */
+    close(pipefd[1]);
 
+    /* 等待子进程 */
+    if (wait_for_child(pid, &status) < 0)
+    {
+        close(pipefd[0]);
+        return (-1);
+    }
+
+    /* 根据退出状态处理 */
+    return handle_child_exit(status, pipefd, redir, shell);
+}
+
+/*
+ * handle_heredoc
+ * 作用：对一个 heredoc redir 节点，创建管道+fork 子进程读取内容
+ * 返回：
+ *  0：成功（redir->heredoc_fd 可用）
+ * -1：失败（中断/系统调用失败）
+ */
+int handle_heredoc(t_redir *redir, t_minishell *shell)
+{
+    int     pipefd[2];
+    pid_t   pid;
+    int     ret;
+    t_sig   saved;
+
+    /* 保存当前信号处理方式，避免 heredoc 改完影响主 shell */
+    save_signals(&saved);
+
+    /* pipe：pipefd[0]=读端 pipefd[1]=写端 */
+    if (pipe(pipefd) < 0)
+        return (restore_signals(&saved), -1);
+
+    /* fork：子进程负责读 heredoc，父进程负责等并保存 fd */
     pid = fork();
     if (pid < 0)
-        return -1;
+        return (restore_signals(&saved), -1);
 
     if (pid == 0)
     {
-        close(pipefd[0]);
-        if (heredoc_loop(pipefd[1], new_redir->filename) < 0)
-            exit(130);
-        close(pipefd[1]);
-        exit(0);
+        /* 子进程路径：写入 heredoc 内容，然后退出 */
+        heredoc_fork_child(redir, shell, pipefd);
+        return (0);
     }
-
-    close(pipefd[1]);
-    signal(SIGINT, SIG_IGN);
-    signal(SIGQUIT, SIG_IGN);
-
-    waitpid(pid, &status, 0);
-
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 130)
+    else
     {
-        close(pipefd[0]);
-        new_redir->heredoc_fd = -1;
-        shell->last_exit_status = 130;
-        return -1;
+        /* 父进程路径：等待并设置 redir->heredoc_fd */
+        ret = heredoc_parent(pid, pipefd, redir, shell);
+        restore_signals(&saved);
+        return (ret);
     }
-
-    new_redir->heredoc_fd = pipefd[0];
-    return 0;
 }

@@ -1,21 +1,16 @@
-/* ************************************************************************** */
-/*                                                                            */
-/*                                                        :::      ::::::::   */
-/*   lexer_del.c                                        :+:      :+:    :+:   */
-/*                                                    +:+ +:+         +:+     */
-/*   By: yzhang2 <yzhang2@student.42.fr>            +#+  +:+       +#+        */
-/*                                                +#+#+#+#+#+   +#+           */
-/*   Created: 2025/10/27 07:19:05 by yzhang2           #+#    #+#             */
-/*   Updated: 2025/10/28 07:05:48 by yzhang2          ###   ########.fr       */
-/*                                                                            */
-/* ************************************************************************** */
+#include "minishell.h"
+#include "lexer.h"
 
-#include "../../include/minishell.h"
-#include "../../include/lexer.h"
-
-// 作用：删除链表头结点（并释放资源）。
-// 参数：头指针地址。
-// 逻辑：调整头指针到 `next`，释放原头（函数体在文件内被截断，但由 `del_one` 使用可知职责）。
+/*
+** 作用：删除链表头结点（并释放资源）。
+**
+** 参数：
+** lst：链表头指针地址
+**
+** 逻辑：
+** tmp=*lst; *lst=tmp->next; clear_one(&tmp);
+** 最后把新头的 prev 置 NULL，保证双向链表正确。
+*/
 void	del_first(t_lexer **lst)
 {
 	t_lexer	*tmp;
@@ -23,15 +18,24 @@ void	del_first(t_lexer **lst)
 	if (!lst || !*lst)
 		return ;
 	tmp = *lst;
-	*lst = tmp->next;
-	clear_one(&tmp);
+	*lst = tmp->next;        /* 头指针后移 */
+
+	clear_one(&tmp);         /* 释放旧头 */
+
 	if (*lst)
-		(*lst)->prev = NULL;
+		(*lst)->prev = NULL; /* 新头没有前驱 */
 }
 
-// 作用：删除索引为 `target` 的中间节点。
-// 参数：起始节点指针、目标索引。
-// 逻辑：遍历找到前驱，修改指针并释放目标节点。
+/*
+** 作用：删除索引为 target 的中间节点。
+**
+** 参数：
+** start：从哪个节点开始找（一般是 head）
+** target：要删除的 idx
+**
+** 循环条件：
+** while(node && node->idx != target) 一直找，找不到就返回
+*/
 static void	remove_target(t_lexer *start, int target)
 {
 	t_lexer	*prev;
@@ -39,6 +43,7 @@ static void	remove_target(t_lexer *start, int target)
 
 	prev = start;
 	node = start->next;
+
 	while (node && node->idx != target)
 	{
 		prev = node;
@@ -46,15 +51,26 @@ static void	remove_target(t_lexer *start, int target)
 	}
 	if (!node)
 		return ;
+
+	/* 从链表中摘掉 node */
 	prev->next = node->next;
 	if (node->next)
 		node->next->prev = prev;
-	clear_one(&node);
+
+	clear_one(&node);        /* 释放目标节点 */
 }
 
-// 作用：删除链表中**指定 idx** 的节点。
-// 参数：头指针地址、目标索引。
-// 逻辑：若头结点 `idx==target` → `del_first`；否则调用 `remove_target`。
+/*
+** 作用：删除链表中指定 idx 的节点。
+**
+** 参数：
+** lst：链表头指针地址
+** target：目标 idx
+**
+** 逻辑：
+** 如果头就是目标 → del_first
+** 否则 → remove_target
+*/
 void	del_one(t_lexer **lst, int target)
 {
 	t_lexer	*start;
