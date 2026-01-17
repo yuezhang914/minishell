@@ -1,7 +1,18 @@
+/* ************************************************************************** */
+/*                                                                            */
+/*                                                        :::      ::::::::   */
+/*   exec_child_utils.c                                 :+:      :+:    :+:   */
+/*                                                    +:+ +:+         +:+     */
+/*   By: yzhang2 <yzhang2@student.42.fr>            +#+  +:+       +#+        */
+/*                                                +#+#+#+#+#+   +#+           */
+/*   Created: 2026/01/11 22:57:11 by yzhang2           #+#    #+#             */
+/*   Updated: 2026/01/11 23:01:06 by yzhang2          ###   ########.fr       */
+/*                                                                            */
+/* ************************************************************************** */
+
 #include "exec.h"
 #include "minishell.h"
 
-/* path_is_dir：用 stat + S_ISDIR 判断路径是不是目录 */
 int	path_is_dir(const char *path)
 {
 	struct stat	st;
@@ -15,7 +26,6 @@ int	path_is_dir(const char *path)
 	return (0);
 }
 
-/* has_bad_heredoc：如果有 heredoc_fd < 0，说明 heredoc 预处理失败/中断 */
 int	has_bad_heredoc(t_redir *r)
 {
 	while (r)
@@ -27,7 +37,6 @@ int	has_bad_heredoc(t_redir *r)
 	return (0);
 }
 
-/* 关闭一个命令节点下所有 heredoc_fd */
 static void	close_heredoc_fds(t_redir *r)
 {
 	while (r)
@@ -41,7 +50,6 @@ static void	close_heredoc_fds(t_redir *r)
 	}
 }
 
-/* close_all_heredoc_fds：递归整棵 AST 把 heredoc_fd 全关掉（避免 fd 泄漏/继承） */
 void	close_all_heredoc_fds(t_ast *node)
 {
 	if (!node)
